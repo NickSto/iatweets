@@ -8,6 +8,50 @@ import json
 import logging
 import argparse
 
+ARG_DEFAULTS = {'log':sys.stderr, 'llevel':logging.ERROR}
+DESCRIPTION = """Prints all tweets as a list of JSON objects.
+If multiple WARC files are given, prints a list of them, as JSON of this format:
+[
+  {
+    "path":"path/to/file1.warc", "tweets":[{tweet1..},{tweet2...}]
+  }
+  {
+    "path":"path/to/file2.warc", "tweets":[{tweet1..},{tweet2...}]
+  }
+]
+"""
+
+
+def main(argv):
+
+  parser = argparse.ArgumentParser(description=DESCRIPTION)
+  parser.set_defaults(**ARG_DEFAULTS)
+
+  parser.add_argument('warcs', metavar='path/to/record.warc', nargs='+',
+    help='Un-gzipped WARC files.')
+  parser.add_argument('-j', '--json', action='store_true',
+    help='Output proper JSON instead of a list of JSON objects (one per tweet).')
+  parser.add_argument('-l', '--log', type=argparse.FileType('w'),
+    help='Print log messages to this file instead of to stderr. Warning: Will overwrite the file.')
+  parser.add_argument('-q', '--quiet', dest='llevel', action='store_const', const=logging.CRITICAL)
+  parser.add_argument('-v', '--verbose', dest='llevel', action='store_const', const=logging.INFO)
+  parser.add_argument('-D', '--debug', dest='log_level', action='store_const', const=logging.DEBUG)
+
+  args = parser.parse_args(argv[1:])
+
+  logging.basicConfig(stream=args.log, level=args.llevel, format='%(message)s')
+  tone_down_logger()
+
+  tweet_files = []
+  for path in args.warcs:
+    tweets = list(parse_warc(path))
+    tweet_files.append({'path':path, 'tweets':tweets})
+
+  if len(tweet_files) == 1:
+    json.dump(tweet_files[0]['tweets'], sys.stdout)
+  else:
+    json.dump(tweet_files, sys.stdout)
+
 
 def parse_warc(warc_path):
   """Usage:
@@ -35,11 +79,18 @@ def parse_warc(warc_path):
       tweet_json += line
 
 
-def main(argv):
-  tweets = []
-  for tweet in parse_warc(argv[1]):
-    tweets.append(tweet)
-  json.dump(tweets, sys.stdout)
+def tone_down_logger():
+  """Change the logging level names from all-caps to capitalized lowercase.
+  E.g. "WARNING" -> "Warning" (turn down the volume a bit in your log files)"""
+  for level in (logging.CRITICAL, logging.ERROR, logging.WARNING, logging.INFO, logging.DEBUG):
+    level_name = logging.getLevelName(level)
+    logging.addLevelName(level, level_name.capitalize())
+
+
+def fail(message):
+  sys.stderr.write(message+"\n")
+  sys.exit(1)
+
 
 if __name__ == '__main__':
   sys.exit(main(sys.argv))
