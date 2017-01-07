@@ -34,9 +34,12 @@ def parse_warc(warc_path):
           continue
       tweet_json += line
 
+
 def main(argv):
+  tweets = []
   for tweet in parse_warc(argv[1]):
-    print(tweet)
+    tweets.append(tweet)
+  json.dump(tweets, sys.stdout)
 
 if __name__ == '__main__':
   sys.exit(main(sys.argv))
