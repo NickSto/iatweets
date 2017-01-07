@@ -10,6 +10,12 @@ import argparse
 
 
 def parse_warc(warc_path):
+  """Usage:
+  import parse_warc
+  for tweet in parse_warc.parse_warc('path/to/filename.warc'):
+    # "tweet" is a JSON object.
+    print tweet.location
+  """
   tweet_json = ''
   header = False
   with open(warc_path, 'rU') as warc:
