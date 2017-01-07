@@ -29,9 +29,9 @@ def main(argv):
 
   parser.add_argument('warcs', metavar='path/to/record.warc', nargs='+',
     help='Un-gzipped WARC files.')
-  parser.add_argument('-j', '--json', action='store_true',
-    help='Output proper JSON instead of a list of JSON objects (one per tweet).')
-  parser.add_argument('-l', '--log', type=argparse.FileType('w'),
+  parser.add_argument('-l', '--list', action='store_true',
+    help='Just print a list of tweets as independent JSON objects, one per line.')
+  parser.add_argument('-L', '--log', type=argparse.FileType('w'),
     help='Print log messages to this file instead of to stderr. Warning: Will overwrite the file.')
   parser.add_argument('-q', '--quiet', dest='llevel', action='store_const', const=logging.CRITICAL)
   parser.add_argument('-v', '--verbose', dest='llevel', action='store_const', const=logging.INFO)
@@ -47,10 +47,16 @@ def main(argv):
     tweets = list(parse_warc(path))
     tweet_files.append({'path':path, 'tweets':tweets})
 
-  if len(tweet_files) == 1:
-    json.dump(tweet_files[0]['tweets'], sys.stdout)
+  if args.list:
+    for tweets in tweet_files:
+      for tweet in tweets['tweets']:
+        json.dump(tweet, sys.stdout)
+        print()
   else:
-    json.dump(tweet_files, sys.stdout)
+    if len(tweet_files) == 1:
+      json.dump(tweet_files[0]['tweets'], sys.stdout)
+    else:
+      json.dump(tweet_files, sys.stdout)
 
 
 def parse_warc(warc_path):
