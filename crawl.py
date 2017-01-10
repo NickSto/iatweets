@@ -42,10 +42,16 @@ def main(argv):
         # It's a tweet type of entry.
         print('https://twitter.com/{}/status/{}'.format(entry['user']['screen_name'], entry['id']))
         print(entry['text'].encode('utf-8'))
+        if entry['in_reply_to_status_id_str']:
+          print('Reply:  https://twitter.com/{}/status/{}'.format(
+                entry['in_reply_to_screen_name'], entry['in_reply_to_status_id_str']))
       elif 'status' in entry:
         # It's a profile type of entry.
         print('https://twitter.com/{}/status/{}'.format(entry['screen_name'], entry['status']['id']))
         print(entry['status']['text'].encode('utf-8'))
+        if entry['status']['in_reply_to_status_id_str']:
+          print('Reply:  https://twitter.com/{}/status/{}'.format(
+                entry['status']['in_reply_to_screen_name'], entry['status']['in_reply_to_status_id_str']))
       else:
         # It's a profile with no attached tweet.
         empties += 1
