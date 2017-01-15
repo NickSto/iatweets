@@ -14,17 +14,20 @@ KEY_NAMES = ('consumer_key', 'consumer_secret', 'access_token_key', 'access_toke
 ARG_DEFAULTS = {'log':sys.stderr, 'volume':logging.ERROR}
 DESCRIPTION = """This script will read a series of tweets, then crawl Twitter to gather replies and
 other information related to them."""
+EPILOG = """Requires the python-twitter module in order to interact with Twitter:
+https://pypi.python.org/pypi/python-twitter/"""
 
 
 def main(argv):
 
-  parser = argparse.ArgumentParser(description=DESCRIPTION)
+  parser = argparse.ArgumentParser(description=DESCRIPTION, epilog=EPILOG)
   parser.set_defaults(**ARG_DEFAULTS)
 
   parser.add_argument('warcs', metavar='path/to/record.warc', nargs='+',
     help='The uncompressed WARC file(s).')
   parser.add_argument('-O', '--oauth-file',
-    help='A config file containing the OAuth keys.')
+    help='A config file containing the OAuth keys. For obtaining these from Twitter, see '
+         'https://python-twitter.readthedocs.io/en/latest/getting_started.html')
   parser.add_argument('-c', '--consumer-key')
   parser.add_argument('-C', '--consumer-secret')
   parser.add_argument('-a', '--access-token-key')
@@ -56,7 +59,11 @@ def main(argv):
         break
 
   if keys:
-    import twitter
+    try:
+      import twitter
+    except ImportError:
+      fail('Interacting with Twitter requires the python-twitter module: '
+           'https://pypi.python.org/pypi/python-twitter/')
     api = twitter.Api(sleep_on_rate_limit=True, **keys)
   elif not args.parse_tweets:
     fail('OAuth keys must be given if --parse-tweets isn\'t.')
