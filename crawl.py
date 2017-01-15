@@ -11,7 +11,7 @@ import ConfigParser
 import parse_warc
 
 KEY_NAMES = ('consumer_key', 'consumer_secret', 'access_token_key', 'access_token_secret')
-ARG_DEFAULTS = {'log':sys.stderr, 'volume':logging.ERROR}
+ARG_DEFAULTS = {'log':sys.stderr, 'volume':logging.WARNING}
 DESCRIPTION = """This script will read a series of tweets, then crawl Twitter to gather replies and
 other information related to them."""
 EPILOG = """Requires the python-twitter module in order to interact with Twitter:
@@ -25,6 +25,9 @@ def main(argv):
 
   parser.add_argument('warcs', metavar='path/to/record.warc', nargs='+',
     help='The uncompressed WARC file(s).')
+  parser.add_argument('-p', '--parse-tweets', action='store_true',
+    help='Just parse the tweets from the WARC files and print them out. '
+         'No Twitter API keys required.')
   parser.add_argument('-O', '--oauth-file',
     help='A config file containing the OAuth keys. For obtaining these from Twitter, see '
          'https://python-twitter.readthedocs.io/en/latest/getting_started.html')
@@ -32,9 +35,8 @@ def main(argv):
   parser.add_argument('-C', '--consumer-secret')
   parser.add_argument('-a', '--access-token-key')
   parser.add_argument('-A', '--access-token-secret')
-  parser.add_argument('-p', '--parse-tweets', action='store_true',
-    help='Just parse the tweets from the WARC files and print them out. '
-         'No Twitter API keys required.')
+  parser.add_argument('-L', '--limit', type=int,
+    help='Maximum number of tweets to request from the Twitter API.')
   parser.add_argument('-l', '--log', type=argparse.FileType('w'),
     help='Print log messages to this file instead of to stderr. Warning: Will overwrite the file.')
   parser.add_argument('-q', '--quiet', dest='volume', action='store_const', const=logging.CRITICAL)
@@ -45,6 +47,11 @@ def main(argv):
 
   logging.basicConfig(stream=args.log, level=args.volume, format='%(message)s')
   tone_down_logger()
+
+  if args.limit is None:
+    remaining = sys.maxsize
+  else:
+    remaining = args.limit
 
   keys = {}
   if args.oauth_file:
@@ -64,7 +71,7 @@ def main(argv):
     except ImportError:
       fail('Interacting with Twitter requires the python-twitter module: '
            'https://pypi.python.org/pypi/python-twitter/')
-    api = twitter.Api(sleep_on_rate_limit=True, **keys)
+    api = twitter.Api(tweet_mode='extended', sleep_on_rate_limit=True, **keys)
   elif not args.parse_tweets:
     fail('OAuth keys must be given if --parse-tweets isn\'t.')
 
@@ -78,22 +85,25 @@ def main(argv):
         empties += 1
         logging.debug(json_pretty_format(entry))
         continue
-      #TODO: The tweet text is often cut off. This seems to be related to:
-      #      https://dev.twitter.com/overview/api/upcoming-changes-to-tweets
-      #      It looks like they're going to (already have?) stop counting things like links, media,
-      #      and usernames toward the 140 character limit, so tweets will actually be (already are?)
-      #      longer than 140 characters with all that stuff included.
-      #      Maybe these tweets were fetched with an older, backward compatible API that keeps all
-      #      that stuff in the tweet text, but truncates it to 140 characters with an ellipsis.
-      #      Figure out if we can use a different API to re-fetch the entire tweet.
       if args.parse_tweets:
         print('https://twitter.com/{}/status/{}'.format(tweet['screen_name'], tweet['id']))
         print(tweet['text'])
-        reply_chain = get_replied_tweets(tweet['in_reply_to_status_id'], api)
-        for reply in reply_chain:
-          print('Replied: https://twitter.com/{}/status/{}'.format(reply.user.screen_name, reply.id))
-          print(reply.text.encode('utf-8'))
+        if keys:
+          reply_chain = get_replied_tweets(tweet['in_reply_to_status_id'], api, remaining=remaining)
+          remaining -= len(reply_chain)
+          if tweet['in_reply_to_status_id']:
+            logging.info('Reply tweet; retrieved {} in replied-to chain.'.format(len(reply_chain)))
+          for reply in reply_chain:
+            # Note: 'full_text' is needed instead of 'text' in order to get new-style tweets over
+            # 140 characters, including @mentions and links:
+            # https://dev.twitter.com/overview/api/upcoming-changes-to-tweets
+            print('Replied: https://twitter.com/{}/status/{}'.format(reply.user.screen_name, reply.id))
+            print(reply.full_text.encode('utf-8'))
         print()
+      if keys and remaining <= 0:
+        break
+    if keys and remaining <= 0:
+      break
   logging.info('Empties: {}'.format(empties))
 
 
@@ -119,10 +129,16 @@ def extract_tweet(entry):
     return None
 
 
-def get_replied_tweets(id, api):
+def get_replied_tweets(id, api, remaining=None):
   reply_chain = []
   while id:
-    tweet = api.GetStatus(id)
+    if remaining is None or remaining > 0:
+      tweet = api.GetStatus(id)
+      remaining -= 1
+    else:
+      logging.warn('--limit exceeded when there were tweets from a conversation remaining to be '
+                   'requested.')
+      break
     id = tweet.in_reply_to_status_id
     reply_chain.append(tweet)
   return reply_chain
