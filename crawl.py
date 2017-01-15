@@ -12,8 +12,8 @@ import parse_warc
 
 KEY_NAMES = ('consumer_key', 'consumer_secret', 'access_token_key', 'access_token_secret')
 ARG_DEFAULTS = {'log':sys.stderr, 'volume':logging.ERROR}
-DESCRIPTION = """This script will eventually read a series of tweets, then crawl Twitter to gather
-replies and other information related to them. Currently, it just parses and prints the tweets."""
+DESCRIPTION = """This script will read a series of tweets, then crawl Twitter to gather replies and
+other information related to them."""
 
 
 def main(argv):
