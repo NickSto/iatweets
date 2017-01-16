@@ -76,7 +76,7 @@ def main(argv):
   empties = 0
   entry_num = 0
   for warc_path in args.warcs:
-    for entry in parse_warc.parse_warc(warc_path):
+    for entry in parse_warc.parse_warc(warc_path, payload_json=True, omit_headers=True):
       entry_num += 1
       tweet = extract_tweet(entry)
       if not tweet:
@@ -115,6 +115,8 @@ def main(argv):
 def extract_tweet(entry):
   """Figure out what kind of Twitter API object this is, and, if possible, extract
   the data we need in a standard data format."""
+  #TODO: Just skip profile types, since I think the point of those isn't to actually contain tweets.
+  #      And the tweets they do contain may be duplicates of others in the archive.
   if 'user' in entry:
     # It's a tweet type of entry.
     return {'id':entry['id'],

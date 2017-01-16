@@ -7,7 +7,9 @@ import json
 import errno
 import logging
 import argparse
+import collections
 
+WARC_VERSION = 'WARC/1.0'
 ARG_DEFAULTS = {'log':sys.stderr, 'llevel':logging.ERROR}
 DESCRIPTION = """Prints all tweets as a list of JSON objects.
 If multiple WARC files are given, prints a list of them, as JSON of this format:
@@ -22,6 +24,8 @@ If multiple WARC files are given, prints a list of them, as JSON of this format:
 """
 
 
+# Note: the problem with the tweet WARCs is that they lack a WARC-Record-ID header.
+# Looks like it should be a UUID.
 def main(argv):
 
   parser = argparse.ArgumentParser(description=DESCRIPTION)
@@ -44,7 +48,7 @@ def main(argv):
 
   tweet_files = []
   for path in args.warcs:
-    tweets = list(parse_warc(path))
+    tweets = list(parse_warc(path, payload_json=True, omit_headers=True))
     tweet_files.append({'path':path, 'tweets':tweets})
 
   if args.list:
@@ -59,30 +63,53 @@ def main(argv):
       json.dump(tweet_files, sys.stdout)
 
 
-def parse_warc(warc_path):
+def parse_warc(warc_path, payload_json=False, header_dict=False, omit_headers=False):
   """Usage:
   import parse_warc
   for tweet in parse_warc.parse_warc('path/to/filename.warc'):
     # "tweet" is a JSON object.
     print tweet.location
   """
-  tweet_json = ''
+  headers = ''
+  content = ''
   header = False
   with open(warc_path, 'rU') as warc:
     for line in warc:
       if header:
         if line.startswith('Content-Length:'):
           header = False
-        continue
+        headers += line
       else:
-        if line == 'WARC/1.0\n':
+        if line == WARC_VERSION+'\n':
           header = True
-          if tweet_json:
-            tweet = json.loads(tweet_json)
-            yield tweet
-          tweet_json = ''
+          if content:
+            if payload_json:
+              payload = json.loads(content)
+            else:
+              payload = content
+            if omit_headers:
+              yield payload
+            else:
+              if header_dict:
+                header_payload = headers_to_dict(headers)
+              else:
+                header_payload = headers
+              yield payload, header_payload
+          headers = ''
+          content = ''
           continue
-      tweet_json += line
+        content += line
+
+
+def headers_to_dict(headers):
+  header_dict = collections.OrderedDict()
+  for header_line in headers.splitlines():
+    fields = header_line.split(':')
+    assert len(fields) >= 2, header_line
+    header = fields[0]
+    value = ':'.join(fields[1:]).lstrip(' ')
+    header_dict[header] = value
+  return header_dict
 
 
 def tone_down_logger():
