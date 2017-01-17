@@ -48,7 +48,7 @@ class Api(object):
                access_token_key=None,
                access_token_secret=None,
                timeout=None,
-               tweet_mode='compat',
+               tweet_mode='extended',
                sleep_on_rate_limit=True):
     self.tweet_mode = tweet_mode
     self.sleep_on_rate_limit = sleep_on_rate_limit
@@ -127,11 +127,10 @@ class Api(object):
       data = {}
 
     data['tweet_mode'] = self.tweet_mode
-    self.last_url = self._BuildUrl(url, extra_params=data)
-    req = requests.Request('GET', self.last_url, auth=self.__auth)
-    resp = requests.get(self.last_url, auth=self.__auth, timeout=self._timeout)
+    full_url = self._BuildUrl(url, extra_params=data)
+    resp = requests.get(full_url, auth=self.__auth, timeout=self._timeout)
 
-    if self.last_url and resp and self.rate_limit:
+    if full_url and resp and self.rate_limit:
       limit = resp.headers.get('x-rate-limit-limit', 0)
       remaining = resp.headers.get('x-rate-limit-remaining', 0)
       reset = resp.headers.get('x-rate-limit-reset', 0)
