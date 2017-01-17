@@ -6,6 +6,7 @@ import sys
 import json
 import uuid
 import errno
+import urlparse
 import logging
 import argparse
 import ConfigParser
@@ -170,7 +171,7 @@ def make_warc_from_response(response):
                        'WARC-Target-URI':response.request.url}
   warc_headers = warc.WARCHeader(warc_headers_dict, defaults=True)
 
-  raw_response_headers = ''
+  raw_response_headers = 'HTTP/1.1 {} {}\r\n'.format(response.status_code, response.reason)
   for header, value in response.headers.items():
     raw_response_headers += '{}: {}\r\n'.format(header, value)
 
@@ -184,7 +185,8 @@ def make_warc_from_request(request, response_id):
                        'WARC-Target-URI':request.url}
   warc_headers = warc.WARCHeader(warc_headers_dict, defaults=True)
 
-  raw_request_headers = ''
+  raw_request_headers = '{} {} HTTP/1.1\r\n'.format(request.method, request.path_url)
+  raw_request_headers += 'Host: {}\r\n'.format(urlparse.urlparse(request.url)[1])
   for header, value in request.headers.items():
     raw_request_headers += '{}: {}\r\n'.format(header, value)
 
