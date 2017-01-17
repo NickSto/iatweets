@@ -82,7 +82,10 @@ class Api(object):
         discreet structure, including: user_mentions, urls, and
         hashtags. [Optional]
     Returns:
-      A twitter.Status instance representing that status message
+      data:
+        The raw content of the response (decoded as UTF-8), or None on failure.
+      resp:
+        The requests.models.Response object.
     """
     url = '%s/statuses/show.json' % (self.base_url)
 
@@ -98,8 +101,10 @@ class Api(object):
     if resp:
       data = resp.content.decode('utf-8')
       self._ParseAndCheckTwitter(data)
+    else:
+      data = None
 
-      return data, resp
+    return data, resp
 
 
   def _RequestUrl(self, url, data=None, json=None):
@@ -110,10 +115,10 @@ class Api(object):
       data:
         A dict of (str, unicode) key/value pairs.
     Returns:
-      A JSON object.
+      The requests.models.Response object.
     """
     if not self.__auth:
-      raise TwitterError("The twitter.Api instance must be authenticated.")
+      raise TwitterError("The retweever.Api instance must be authenticated.")
 
     if url and self.sleep_on_rate_limit:
       limit = self.CheckRateLimit(url)
@@ -248,7 +253,7 @@ class Api(object):
       data (dict):
         A python dict created from the Twitter json response
     Raises:
-      (twitter.TwitterError): TwitterError wrapping the twitter error
+      (TwitterError): TwitterError wrapping the twitter error
       message if one exists.
     """
     # Twitter errors are relatively unlikely, so it is faster
