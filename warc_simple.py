@@ -8,8 +8,13 @@ import errno
 import logging
 import argparse
 import collections
+"""
+This module parses WARC-like files with few restrictions.
+Any file should work, if it consists of one or more WARC records, each beginning with a version
+number line like "WARC/1.0". The headers must end with one blank line.
+The version number is the only required header (for parsing).
+"""
 
-WARC_VERSION = 'WARC/1.0'
 ARG_DEFAULTS = {'log':sys.stderr, 'llevel':logging.ERROR}
 DESCRIPTION = """Prints all tweets as a list of JSON objects.
 If multiple WARC files are given, prints a list of them, as JSON of this format:
@@ -65,10 +70,9 @@ def main(argv):
 
 def parse_warc(warc_path, payload_json=False, header_dict=False, omit_headers=False):
   """Usage:
-  import parse_warc
-  for tweet in parse_warc.parse_warc('path/to/filename.warc'):
-    # "tweet" is a JSON object.
-    print tweet.location
+  import warc_simple
+  for payload, headers in parse_warc.parse_warc('path/to/filename.warc'):
+    print payload
   """
   headers = ''
   content = ''
@@ -76,35 +80,53 @@ def parse_warc(warc_path, payload_json=False, header_dict=False, omit_headers=Fa
   with open(warc_path, 'rU') as warc:
     for line in warc:
       if header:
-        if line.startswith('Content-Length:'):
+        if not line.rstrip('\r\n'):
+          # The header ends at the first blank line.
           header = False
-        headers += line
+        else:
+          headers += line
       else:
-        if line == WARC_VERSION+'\n':
-          header = True
+        if line.startswith('WARC/'):
+          # Does the line look like the start of a WARC header? ("WARC/1.0")
+          try:
+            float(line[5:].rstrip('\r\n'))
+            header = True
+          except ValueError:
+            pass
+        if header:
+          # We're starting a new record. Output the previous record, if any, and reset.
           if content:
-            if payload_json:
-              payload = json.loads(content)
-            else:
-              payload = content
-            if omit_headers:
-              yield payload
-            else:
-              if header_dict:
-                header_payload = headers_to_dict(headers)
-              else:
-                header_payload = headers
-              yield payload, header_payload
-          headers = ''
+            yield create_return_data(content, headers, payload_json, omit_headers, header_dict)
+          headers = line
           content = ''
-          continue
-        content += line
+        else:
+          content += line
+    if content:
+      yield create_return_data(content, headers, payload_json, omit_headers, header_dict)
+
+
+def create_return_data(content, headers, payload_json, omit_headers, header_dict):
+  if payload_json:
+    payload = json.loads(content)
+  else:
+    payload = content
+  if omit_headers:
+    return payload
+  else:
+    if header_dict:
+      header_payload = headers_to_dict(headers)
+    else:
+      header_payload = headers
+    return payload, header_payload
 
 
 def headers_to_dict(headers):
   header_dict = collections.OrderedDict()
   for header_line in headers.splitlines():
     fields = header_line.split(':')
+    if header_line.startswith('WARC/') and len(fields) == 1:
+      header_dict['__VERSION__'] = header_line
+      continue
     assert len(fields) >= 2, header_line
     header = fields[0]
     value = ':'.join(fields[1:]).lstrip(' ')
