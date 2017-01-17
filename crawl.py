@@ -78,7 +78,7 @@ def main(argv):
   empties = 0
   entry_num = 0
   for warc_path in args.warcs:
-    for entry, headers in warc_simple.parse_warc(warc_path, payload_json=False, header_dict=False):
+    for entry, headers in warc_simple.parse(warc_path, payload_json=False, header_dict=False):
       entry_num += 1
       tweet = extract_tweet(entry)
       if not tweet:

@@ -68,7 +68,7 @@ def main(argv):
       json.dump(tweet_files, sys.stdout)
 
 
-def parse_warc(warc_path, payload_json=False, header_dict=False, omit_headers=False):
+def parse(warc_path, payload_json=False, header_dict=False, omit_headers=False):
   """Usage:
   import warc_simple
   for payload, headers in parse_warc.parse_warc('path/to/filename.warc'):
