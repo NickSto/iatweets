@@ -4,33 +4,39 @@ from __future__ import print_function
 from __future__ import absolute_import
 import sys
 import json
+import uuid
 import errno
 import logging
 import argparse
 import ConfigParser
 import warc_simple
+import warc
+import retweever
 
 KEY_NAMES = ('consumer_key', 'consumer_secret', 'access_token_key', 'access_token_secret')
-ARG_DEFAULTS = {'log':sys.stderr, 'volume':logging.WARNING}
+ARG_DEFAULTS = {'output':'human', 'log':sys.stderr, 'volume':logging.WARNING}
 DESCRIPTION = """This script will read a series of tweets from unzipped WARC files, then use the
 Twitter API to re-retrieve them (to get the full, un-truncated text) and gather replies and other
 information related to them."""
-EPILOG = """Requires the python-twitter module in order to interact with Twitter:
-https://pypi.python.org/pypi/python-twitter/"""
 
 
 def main(argv):
 
-  parser = argparse.ArgumentParser(description=DESCRIPTION, epilog=EPILOG)
+  parser = argparse.ArgumentParser(description=DESCRIPTION)
   parser.set_defaults(**ARG_DEFAULTS)
 
   parser.add_argument('warcs', metavar='path/to/record.warc', nargs='+',
     help='The uncompressed WARC file(s).')
   parser.add_argument('-p', '--parse-tweets', action='store_true',
     help='Just parse the tweets from the WARC files and print them out. '
-         'No Twitter API keys required.')
+         'No Twitter API keys required. This will print the WARCs almost literally as they exist '
+         'in the original files, but it will add a wARC-Record-Id to each (missing in the '
+         'originals).')
+  parser.add_argument('-o', '--output', choices=('human', 'warc'),
+    help='Print either human-readable text or a WARC record for each tweet.')
   parser.add_argument('-O', '--oauth-file',
-    help='A config file containing the OAuth keys. For obtaining these from Twitter, see '
+    help='A config file containing the OAuth keys. See "oauth.cfg.sample" for an example (with '
+         'dummy keys). For obtaining these from Twitter, see '
          'https://python-twitter.readthedocs.io/en/latest/getting_started.html')
   parser.add_argument('-c', '--consumer-key')
   parser.add_argument('-C', '--consumer-secret')
@@ -60,51 +66,65 @@ def main(argv):
       keys = read_oauth_config(args.oauth_file, KEY_NAMES)
     else:
       keys = {}
-      for key_name in key_names:
+      for key_name in KEY_NAMES:
         key = getattr(args, key_name)
         if key:
           keys[key_name] = key
         else:
           fail('All four OAuth tokens must be given unless --parse-tweets is.')
-    try:
-      import twitter
-    except ImportError:
-      fail('Interacting with Twitter requires the python-twitter module: '
-           'https://pypi.python.org/pypi/python-twitter/')
-    api = twitter.Api(tweet_mode='extended', sleep_on_rate_limit=True, **keys)
+    api = retweever.Api(tweet_mode='extended', sleep_on_rate_limit=True, **keys)
 
   empties = 0
   entry_num = 0
   for warc_path in args.warcs:
-    for entry in warc_simple.parse_warc(warc_path, payload_json=True, omit_headers=True):
+    for entry, headers in warc_simple.parse_warc(warc_path, payload_json=False, header_dict=False):
       entry_num += 1
       tweet = extract_tweet(entry)
       if not tweet:
         empties += 1
-        logging.debug(json_pretty_format(entry))
-        continue
+        logging.debug(entry)
       if args.parse_tweets:
-        print('https://twitter.com/{screen_name}/status/{id}'.format(**tweet))
-        print(tweet['text'])
-        if tweet['in_reply_to_status_id']:
-          print('A reply to: https//twitter.com/{in_reply_to_screen_name}/status/'
-                '{in_reply_to_status_id}'.format(**tweet))
-        print()
-      else:
+        if args.output == 'human':
+          print('https://twitter.com/{screen_name}/status/{id}'.format(**tweet))
+          print(tweet['text'])
+          if tweet['in_reply_to_status_id']:
+            print('A reply to: https//twitter.com/{in_reply_to_screen_name}/status/'
+                  '{in_reply_to_status_id}'.format(**tweet))
+          print()
+        elif args.output == 'warc':
+          sys.stdout.write(warc_header_fix(headers)+'\r\n')
+          sys.stdout.write(entry+'\r\n')
+      elif tweet:
         # Use the Twitter API to re-retrieve this tweet (to get the full text), and the full reply
         # chain if it was a reply.
         #TODO: Check if it's actually truncated, and if not, just use the original tweet data.
+        #TODO: Check if the API returned an error and either just print the original tweet data if
+        #      it's an old one, or if not, print the error response as a WARC.
         reply_chain = get_replied_tweets(tweet['id'], api, remaining=remaining)
         remaining -= len(reply_chain)
         if tweet['in_reply_to_status_id']:
           logging.info('Reply tweet; retrieved {} in reply chain.'.format(len(reply_chain)))
-        for reply in reply_chain:
-          # Note: 'full_text' is needed instead of 'text' in order to get new-style tweets over
-          # 140 characters, including @mentions and links:
-          # https://dev.twitter.com/overview/api/upcoming-changes-to-tweets
-          print('https://twitter.com/{}/status/{}'.format(reply.user.screen_name, reply.id))
-          print(reply.full_text.encode('utf-8'))
-        print()
+        for reply_tweet, response in reply_chain:
+          if args.output == 'human':
+            # Note: 'full_text' is needed instead of 'text' in order to get new-style tweets over
+            # 140 characters, including @mentions and links:
+            # https://dev.twitter.com/overview/api/upcoming-changes-to-tweets
+            print('https://twitter.com/{}/status/{}'.format(reply.user.screen_name, reply.id))
+            print(reply.full_text.encode('utf-8'))
+          elif args.output == 'warc':
+            response_warc = make_warc_from_response(response)
+            record_id = response_warc.header['WARC-Record-Id']
+            request_warc = make_warc_from_request(response.request, record_id)
+            request_warc.write_to(sys.stdout)
+            response_warc.write_to(sys.stdout)
+        if args.output == 'warc':
+          sys.stdout.write('\r\n')
+        else:
+          print()
+      else:
+        # Empty entry. Print it literally and move on.
+        sys.stdout.write(warc_header_fix(headers)+'\r\n')
+        sys.stdout.write(entry+'\r\n')
       if remaining <= 0:
         break
     if remaining <= 0:
@@ -112,11 +132,12 @@ def main(argv):
   logging.info('Empties: {}'.format(empties))
 
 
-def extract_tweet(entry):
+def extract_tweet(entry_raw):
   """Figure out what kind of Twitter API object this is, and, if possible, extract
   the data we need in a standard data format."""
   #TODO: Just skip profile types, since I think the point of those isn't to actually contain tweets.
   #      And the tweets they do contain may be duplicates of others in the archive.
+  entry = json.loads(entry_raw)
   if 'user' in entry:
     # It's a tweet type of entry.
     return {'id':entry['id'],
@@ -136,18 +157,52 @@ def extract_tweet(entry):
     return None
 
 
+def warc_header_fix(headers):
+  """The WARCs holding the original tweets lack a WARC-Record-Id."""
+  headers_dict = warc_simple.headers_to_dict(headers)
+  if 'WARC-Record-ID' not in headers_dict:
+    headers += 'WARC-Record-ID: <urn:uuid:{}>\r\n'.format(uuid.uuid4())
+  return headers
+
+
+def make_warc_from_response(response):
+  warc_headers_dict = {'WARC-Type':'response',
+                       'WARC-Target-URI':response.request.url}
+  warc_headers = warc.WARCHeader(warc_headers_dict, defaults=True)
+
+  raw_response_headers = ''
+  for header, value in response.headers.items():
+    raw_response_headers += '{}: {}\r\n'.format(header, value)
+
+  payload = raw_response_headers+'\r\n'+response.content
+  return warc.WARCRecord(warc_headers, payload)
+
+
+def make_warc_from_request(request, response_id):
+  warc_headers_dict = {'WARC-Type':'request',
+                       'WARC-Concurrent-To':response_id,
+                       'WARC-Target-URI':request.url}
+  warc_headers = warc.WARCHeader(warc_headers_dict, defaults=True)
+
+  raw_request_headers = ''
+  for header, value in request.headers.items():
+    raw_request_headers += '{}: {}\r\n'.format(header, value)
+
+  return warc.WARCRecord(warc_headers, raw_request_headers)
+
+
 def get_replied_tweets(id, api, remaining=None):
   reply_chain = []
   while id:
     if remaining is None or remaining > 0:
-      tweet = api.GetStatus(id)
+      tweet, response = api.GetStatus(id)
       remaining -= 1
     else:
       logging.warn('--limit exceeded when there were tweets from a conversation remaining to be '
                    'requested.')
       break
-    id = tweet.in_reply_to_status_id
-    reply_chain.append(tweet)
+    id = response.json()['in_reply_to_status_id']
+    reply_chain.append((tweet, response))
   return reply_chain
 
 
