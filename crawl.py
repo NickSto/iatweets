@@ -265,21 +265,13 @@ def format_tweet_for_humans(raw_tweet, file_num, entry_num):
 
 
 def does_tweet_look_truncated(tweet):
-  """Returns True if the tweet contains the \u2026 (horizontal ellipsis) character."""
-  # If it says it's truncated, we can say it's truncated.
-  if tweet['truncated']:
-    return True
+  """Returns True if the tweet doesn't contain 'full_text' and contains the \u2026
+  (horizontal ellipsis) character."""
   # If 'full_text' is in there, that's using the new, extended mode. It's the whole thing.
   if 'full_text' in tweet:
     return False
-  # If 'truncated' is False and it's not a retweet, it should be the whole thing.
-  if 'retweeted_status' not in tweet:
-    return False
-  # Otherwise, we're dealing with a retweet, which could be over 140 characters without declaring
-  # itself 'truncated'. Just check for the ellipsis character. This will yield some false positives,
-  # but no false negatives.
   content = tweet['text'].decode('utf-8')
-  if u'\u2026' in content and len(content) >= 100:
+  if u'\u2026' in content:
     return True
   else:
     return False
