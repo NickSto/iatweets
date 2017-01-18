@@ -41,6 +41,8 @@ def main(argv):
     help='A config file containing the OAuth keys. See "oauth.cfg.sample" for an example (with '
          'dummy keys). For obtaining these from Twitter, see '
          'https://python-twitter.readthedocs.io/en/latest/getting_started.html')
+  parser.add_argument('-d', '--dedup', action='store_true',
+    help='Don\'t retrieve tweets already obtained in this run.')
   parser.add_argument('-c', '--consumer-key')
   parser.add_argument('-C', '--consumer-secret')
   parser.add_argument('-a', '--access-token-key')
@@ -77,11 +79,13 @@ def main(argv):
           fail('All four OAuth tokens must be given unless --parse-tweets is.')
     api = retweever.Api(tweet_mode='extended', sleep_on_rate_limit=True, **keys)
 
+  done = {}
   empties = 0
   file_num = 0
   entry_num = 0
   for warc_path in args.warcs:
     file_num += 1
+    logging.info('Starting file {}: {}'.format(file_num, warc_path))
     for entry, headers in warc_simple.parse(warc_path, payload_json=False, header_dict=False):
       entry_num += 1
       tweet = extract_tweet(entry)
@@ -116,7 +120,10 @@ def main(argv):
           logging.info('{}/{}: Tweet not truncated. Not re-retrieving.'.format(file_num, entry_num))
           tweet_id = tweet.get('in_reply_to_status_id')
         # Retrieve all tweets in the conversation.
-        reply_chain = get_replied_tweets(tweet_id, api, remaining=remaining)
+        if args.dedup:
+          reply_chain = get_replied_tweets(tweet_id, api, remaining=remaining, done=done)
+        else:
+          reply_chain = get_replied_tweets(tweet_id, api, remaining=remaining)
         remaining -= len(reply_chain)
         if tweet_id != tweet['id']:
           # The original tweet isn't yet in the list of those retrieved from Twitter, since it
@@ -181,6 +188,7 @@ def main(argv):
     if remaining <= 0:
       break
   logging.info('Empties: {}'.format(empties))
+  logging.info('Skipped: '+str(sum(done.values())))
 
 
 def extract_tweet(entry_raw):
@@ -320,14 +328,20 @@ def make_warc_from_request(request, response_id):
   return warc.WARCRecord(warc_headers, raw_request_headers)
 
 
-def get_replied_tweets(id, api, remaining=None):
+def get_replied_tweets(id, api, remaining=None, done=None):
   """Retrieve a tweet and all tweets before it in the conversation chain.
   Supply the status id as an integer and an authenticated retweever.Api object.
   The status id can be None or 0 if no tweets need to be retrieved. Then this will return an empty
   list.
   Returns a list of requests.models.Response objects, one for each tweet in the chain."""
+  if done is None:
+    done = {}
   reply_chain = []
   while id:
+    if id in done:
+      logging.info('Tweet {} already done {} times. Skipping..'.format(id, done[id]))
+      done[id] += 1
+      break
     if remaining is None or remaining > 0:
       data, response = api.GetStatus(id)
       remaining -= 1
@@ -337,6 +351,7 @@ def get_replied_tweets(id, api, remaining=None):
       break
     reply_chain.append(response)
     if response.status_code == 200:
+      done[id] = done.get(id, 0) + 1
       response_json = response.json()
       try:
         id = response_json['in_reply_to_status_id']
@@ -368,7 +383,7 @@ def read_oauth_config(oauth_file, key_names):
     if config.has_option('auth', key_name):
       keys[key_name] = config.get('auth', key_name)
     else:
-      fail('OAuth token "{}" not found in --oauth-file "{}".'.format(key_name, config_file))
+      fail('OAuth token "{}" not found in --oauth-file "{}".'.format(key_name, oauth_file))
   return keys
 
 
