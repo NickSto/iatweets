@@ -3,6 +3,7 @@ from __future__ import division
 from __future__ import print_function
 from __future__ import absolute_import
 import sys
+import time
 import json
 import uuid
 import errno
@@ -10,8 +11,9 @@ import urlparse
 import logging
 import argparse
 import ConfigParser
-import warc_simple
+import requests
 import warc
+import warc_simple
 import retweever
 
 KEY_NAMES = ('consumer_key', 'consumer_secret', 'access_token_key', 'access_token_secret')
@@ -76,56 +78,104 @@ def main(argv):
     api = retweever.Api(tweet_mode='extended', sleep_on_rate_limit=True, **keys)
 
   empties = 0
+  file_num = 0
   entry_num = 0
   for warc_path in args.warcs:
+    file_num += 1
     for entry, headers in warc_simple.parse(warc_path, payload_json=False, header_dict=False):
       entry_num += 1
       tweet = extract_tweet(entry)
       if not tweet:
+        # Empty entry.
         empties += 1
         logging.debug(entry)
-      if args.parse_tweets:
         if args.output == 'human':
-          print('https://twitter.com/{screen_name}/status/{id}'.format(**tweet))
-          print(tweet['text'])
-          if tweet['in_reply_to_status_id']:
-            print('A reply to: https//twitter.com/{in_reply_to_screen_name}/status/'
-                  '{in_reply_to_status_id}'.format(**tweet))
+          print('{}/{}: Empty entry.\n'.format(file_num, entry_num))
+        elif args.output == 'warc':
+          # Print it literally and move on.
+          sys.stdout.write(warc_header_fix(headers)+'\r\n')
+          sys.stdout.write(entry+'\r\n')
+      elif args.parse_tweets:
+        if args.output == 'human':
+          print(format_tweet_for_humans(tweet, file_num, entry_num))
           print()
         elif args.output == 'warc':
           sys.stdout.write(warc_header_fix(headers)+'\r\n')
           sys.stdout.write(entry+'\r\n')
-      elif tweet:
-        # Use the Twitter API to re-retrieve this tweet (to get the full text), and the full reply
-        # chain if it was a reply.
-        #TODO: Check if it's actually truncated, and if not, just use the original tweet data.
-        #TODO: Check if the API returned an error and either just print the original tweet data if
-        #      it's an old one, or if not, print the error response as a WARC.
-        reply_chain = get_replied_tweets(tweet['id'], api, remaining=remaining)
+      else:
+        # Print this tweet and all others above it in the conversation.
+        # Use the Twitter API to re-retrieve this tweet if it's truncated, and the rest of the
+        # conversation chain.
+        tweet_looks_truncated = does_tweet_look_truncated(tweet)
+        if tweet_looks_truncated:
+          # Include this tweet in those retrieved from the Twitter API.
+          logging.info('{}/{}: Tweet truncated. Re-retrieving.'.format(file_num, entry_num))
+          tweet_id = tweet['id']
+        else:
+          # We already have the whole tweet. Only get replied-to tweets.
+          logging.info('{}/{}: Tweet not truncated. Not re-retrieving.'.format(file_num, entry_num))
+          tweet_id = tweet.get('in_reply_to_status_id')
+        # Retrieve all tweets in the conversation.
+        reply_chain = get_replied_tweets(tweet_id, api, remaining=remaining)
         remaining -= len(reply_chain)
+        if tweet_id != tweet['id']:
+          # The original tweet isn't yet in the list of those retrieved from Twitter, since it
+          # wasn't truncated. Add it to the front.
+          reply_chain.insert(0, tweet)
+        limit = api.get_rate_limit()
+        rate_limit_summary = summarize_rate_limit_status(api)
+        if rate_limit_summary:
+          logging.info('{}/{}: {}'.format(file_num, entry_num, rate_limit_summary))
         if tweet['in_reply_to_status_id']:
-          logging.info('Reply tweet; retrieved {} in reply chain.'.format(len(reply_chain)))
-        for reply_tweet, response in reply_chain:
+          logging.info('{}/{}: Reply tweet; retrieved {} in reply chain.'
+                       .format(file_num, entry_num, len(reply_chain)))
+        elif len(reply_chain) == 0:
+          logging.warn('{}/{}: No tweets in conversation.'.format(file_num, entry_num))
+        first_tweet = True
+        # Print out the conversation.
+        for response in reply_chain:
           if args.output == 'human':
-            # Note: 'full_text' is needed instead of 'text' in order to get new-style tweets over
-            # 140 characters, including @mentions and links:
-            # https://dev.twitter.com/overview/api/upcoming-changes-to-tweets
-            print('https://twitter.com/{}/status/{}'.format(reply.user.screen_name, reply.id))
-            print(reply.full_text.encode('utf-8'))
+            if not hasattr(response, 'status_code'):
+              # It's the JSON of the original tweet, meaning we didn't need to re-retrieve it.
+              # Just print the original tweet.
+              print(format_tweet_for_humans(tweet, file_num, entry_num))
+            elif response.status_code == 200:
+              print(format_tweet_for_humans(response, file_num, entry_num))
+            elif first_tweet:
+              # It's the first tweet in the conversation, but it's truncated, and retrieval from
+              # the Twitter API failed. Use the original data from the input WARC instead.
+              print(format_tweet_for_humans(tweet, file_num, entry_num))
+            else:
+              # It's an earlier tweet in the conversation, but retrieval from the Twitter API
+              # failed. All we can do is print the error response.
+              logging.warn('{}/{}: Twitter API error {}'
+                           .format(file_num, entry_num, response.status_code))
           elif args.output == 'warc':
-            response_warc = make_warc_from_response(response)
-            record_id = response_warc.header['WARC-Record-Id']
-            request_warc = make_warc_from_request(response.request, record_id)
-            request_warc.write_to(sys.stdout)
-            response_warc.write_to(sys.stdout)
+            if not hasattr(response, 'status_code'):
+              # It's the JSON of the original tweet, meaning we didn't need to re-retrieve it.
+              # Printing the original data from the WARC is all we need.
+              sys.stdout.write(warc_header_fix(headers)+'\r\n')
+              sys.stdout.write(entry+'\r\n')
+            elif response.status_code == 200:
+              write_warcs(response, sys.stdout)
+            elif first_tweet:
+              # It's the first tweet in the conversation, but it's truncated, and retrieval from
+              # the Twitter API failed. Use the original data from the input WARC instead.
+              logging.warn('{}/{}: Twitter API error {} on old tweet. Using original data instead.'
+                           .format(file_num, entry_num, response.status_code))
+              sys.stdout.write(warc_header_fix(headers)+'\r\n')
+              sys.stdout.write(entry+'\r\n')
+            else:
+              # It's an earlier tweet in the conversation, but retrieval from the Twitter API
+              # failed. All we can do is print the error response.
+              logging.warn('{}/{}: Twitter API error {}.'
+                           .format(file_num, entry_num, response.status_code))
+              write_warcs(response, sys.stdout)
+          first_tweet = False
         if args.output == 'warc':
           sys.stdout.write('\r\n')
         else:
           print()
-      else:
-        # Empty entry. Print it literally and move on.
-        sys.stdout.write(warc_header_fix(headers)+'\r\n')
-        sys.stdout.write(entry+'\r\n')
       if remaining <= 0:
         break
     if remaining <= 0:
@@ -142,6 +192,7 @@ def extract_tweet(entry_raw):
   if 'user' in entry:
     # It's a tweet type of entry.
     return {'id':entry['id'],
+            'truncated':entry['truncated'],
             'screen_name':entry['user']['screen_name'],
             'in_reply_to_status_id':entry.get('in_reply_to_status_id'),
             'in_reply_to_screen_name':entry.get('in_reply_to_screen_name'),
@@ -149,6 +200,7 @@ def extract_tweet(entry_raw):
   elif 'status' in entry:
     # It's a profile type of entry.
     return {'id':entry['status']['id'],
+            'truncated':entry['status']['truncated'],
             'screen_name':entry['screen_name'],
             'in_reply_to_status_id':entry['status'].get('in_reply_to_status_id'),
             'in_reply_to_screen_name':entry['status'].get('in_reply_to_screen_name'),
@@ -158,12 +210,95 @@ def extract_tweet(entry_raw):
     return None
 
 
+def get_status(entry):
+  if 'user' in entry:
+    return entry
+  elif 'status' in entry:
+    return entry['status']
+  else:
+    return None
+
+
+def format_tweet_for_humans(raw_tweet, file_num, entry_num):
+  output = ''
+  if isinstance(raw_tweet, dict):
+    data_type = 'json'
+    tweet = raw_tweet
+  elif isinstance(raw_tweet, requests.models.Response):
+    data_type = 'request'
+    tweet = raw_tweet.json()
+  elif isinstance(raw_tweet, basestring):
+    data_type = 'json_str'
+    tweet = json.loads(raw_tweet)
+  else:
+    fail('{}/{}: Object of unsupported type ({}) given to format_tweet_for_humans().'
+         .format(file_num, entry_num, type(raw_tweet)))
+  try:
+    if data_type == 'request':
+      screen_name = tweet['user']['screen_name']
+    else:
+      screen_name = tweet['screen_name']
+    id = tweet['id']
+    # Note: 'full_text' is needed instead of 'text' in order to get new-style tweets over 140
+    # characters, including @mentions and links:
+    # https://dev.twitter.com/overview/api/upcoming-changes-to-tweets
+    if data_type == 'request':
+      content = tweet['full_text'].encode('utf-8')
+    else:
+      content = tweet['text'].decode('utf-8').encode('utf-8')
+    output += '{}/{}: https://twitter.com/{}/status/{}\n'.format(file_num, entry_num, screen_name, id)
+    try:
+      output += content
+    except UnicodeDecodeError:
+      logging.error('{}/{}: data_type: {}, content: {}'
+                    .format(file_num, entry_num, data_type, content))
+      raise
+    if tweet['in_reply_to_status_id']:
+      output += ('\nA reply to: https//twitter.com/{in_reply_to_screen_name}/status/'
+                 '{in_reply_to_status_id}'.format(**tweet))
+    output += '\nLooks truncated: {}'.format(does_tweet_look_truncated(tweet))
+  except KeyError as ke:
+    logging.warn('{}/{}: Error in tweet data converted from {}: JSON is missing key "{}".\n '
+                 'Tweet: {}..'.format(file_num, entry_num, data_type, ke[0], json.dumps(tweet))[:200])
+    raise
+  return output
+
+
+def does_tweet_look_truncated(tweet):
+  """Returns True if the tweet contains the \u2026 (horizontal ellipsis) character."""
+  # If it says it's truncated, we can say it's truncated.
+  if tweet['truncated']:
+    return True
+  # If 'full_text' is in there, that's using the new, extended mode. It's the whole thing.
+  if 'full_text' in tweet:
+    return False
+  # If 'truncated' is False and it's not a retweet, it should be the whole thing.
+  if 'retweeted_status' not in tweet:
+    return False
+  # Otherwise, we're dealing with a retweet, which could be over 140 characters without declaring
+  # itself 'truncated'. Just check for the ellipsis character. This will yield some false positives,
+  # but no false negatives.
+  content = tweet['text'].decode('utf-8')
+  if u'\u2026' in content and len(content) >= 100:
+    return True
+  else:
+    return False
+
+
 def warc_header_fix(headers):
   """The WARCs holding the original tweets lack a WARC-Record-Id."""
   headers_dict = warc_simple.headers_to_dict(headers)
   if 'WARC-Record-ID' not in headers_dict:
     headers += 'WARC-Record-ID: <urn:uuid:{}>\r\n'.format(uuid.uuid4())
   return headers
+
+
+def write_warcs(response, destination=sys.stdout):
+  response_warc = make_warc_from_response(response)
+  record_id = response_warc.header['WARC-Record-Id']
+  request_warc = make_warc_from_request(response.request, record_id)
+  request_warc.write_to(destination)
+  response_warc.write_to(destination)
 
 
 def make_warc_from_response(response):
@@ -194,19 +329,40 @@ def make_warc_from_request(request, response_id):
 
 
 def get_replied_tweets(id, api, remaining=None):
+  """Retrieve a tweet and all tweets before it in the conversation chain.
+  Supply the status id as an integer and an authenticated retweever.Api object.
+  The status id can be None or 0 if no tweets need to be retrieved. Then this will return an empty
+  list.
+  Returns a list of requests.models.Response objects, one for each tweet in the chain."""
   reply_chain = []
   while id:
     if remaining is None or remaining > 0:
-      tweet, response = api.GetStatus(id)
+      data, response = api.GetStatus(id)
       remaining -= 1
     else:
       logging.warn('--limit exceeded when there were tweets from a conversation remaining to be '
                    'requested.')
       break
-    id = response.json()['in_reply_to_status_id']
-    reply_chain.append((tweet, response))
+    reply_chain.append(response)
+    if response.status_code == 200:
+      response_json = response.json()
+      try:
+        id = response_json['in_reply_to_status_id']
+      except KeyError:
+        break
+    else:
+      break
   return reply_chain
 
+
+def summarize_rate_limit_status(api):
+  limit = api.get_rate_limit()
+  now = time.time()
+  until_reset = limit.reset - now
+  if limit.reset == 0:
+    return ''
+  else:
+    return '{} requests remaining in next {:0.1f} minutes'.format(limit.remaining, until_reset/60)
 
 def json_pretty_format(jobj):
   return json.dumps(jobj, sort_keys=True, indent=2, separators=(',', ': ')).encode('utf-8')
