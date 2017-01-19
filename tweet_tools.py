@@ -11,7 +11,7 @@ import requests
 import warc_simple
 
 
-ARG_DEFAULTS = {'columns':'WARC-Target-URI,screen_name,id,text', 'log':sys.stderr, 'volume':logging.ERROR}
+ARG_DEFAULTS = {'columns':'WARC-Target-URI,user,id,text', 'log':sys.stderr, 'volume':logging.ERROR}
 DESCRIPTION = """"""
 
 
@@ -24,7 +24,9 @@ def make_argparser():
     help='Un-gzipped WARC files.')
   parser.add_argument('-c', '--columns',
     help='Output columns, comma-delimited. Names are WARC headers or fields from the tweet JSON. '
-         'Default: %(default)s')
+         'Also includes special columns: id, user, text, truncated, in_reply_to_status_id, '
+         'in_reply_to_screen_name, is_retweet, retweeted_id, retweeted_text, user_mentions, '
+         'filename, tweet_num. Default: %(default)s')
   parser.add_argument('-i', '--ignore-empties', action='store_true')
   parser.add_argument('-L', '--log', type=argparse.FileType('w'),
     help='Print log messages to this file instead of to stderr. Warning: Will overwrite the file.')
@@ -45,15 +47,24 @@ def main(argv):
   logging.basicConfig(stream=args.log, level=args.volume, format='%(message)s')
   tone_down_logger()
 
+  tweet_num = 0
   for warc_path in args.warcs:
     for payload, headers in warc_simple.parse(warc_path, payload_json=True, header_dict=True):
+      tweet_num += 1
       if not payload and args.ignore_empties:
         continue
-      columns_dict = extract_tweet(payload, already_json=True, empty_empties=False)
+      columns_dict = payload
+      columns_dict.update(headers)
+      columns_dict.update(extract_tweet(payload, already_json=True, empty_empties=False))
       if columns_dict['text']:
         columns_dict['text'] = columns_dict['text'].replace('\n', '\\n')
-      columns_dict.update(headers)
-      print(outfmt.format(**columns_dict))
+      columns_dict['filename'] = warc_path
+      columns_dict['tweet_num'] = tweet_num
+      try:
+        print(outfmt.format(**columns_dict))
+      except KeyError as ke:
+        fail('Invalid column name "{}" given with --columns. Failed on tweet {}.'
+             .format(ke[0], tweet_num))
 
 
 def extract_tweet(entry_raw, already_json=False, empty_empties=True):
@@ -68,15 +79,8 @@ def extract_tweet(entry_raw, already_json=False, empty_empties=True):
       logging.critical('Content: {}'.format(type(entry_raw).__name__, entry_raw[:90]))
       raise
   # Find the user and status objects in the entry.
-  if 'user' in entry:
-    # It's a status type of entry.
-    status = entry
-    user = entry['user']
-  elif 'status' in entry:
-    # It's a profile type of entry.
-    status = entry['status']
-    user = entry
-  else:
+  status, user = get_user_and_status(entry)
+  if status is None and user is None:
     # It's a profile with no attached tweet (or something else).
     if empty_empties:
       return None
@@ -89,22 +93,52 @@ def extract_tweet(entry_raw, already_json=False, empty_empties=True):
     text = status.get('text')
   if text is not None:
     text = text.encode('utf-8')
+  # If it's a retweet, get data about the original tweet.
+  retweeted_status = status.get('retweeted_status')
+  if retweeted_status:
+    retweeted_id = retweeted_status.get('id')
+    retweeted_text = retweeted_status.get('full_text') or retweeted_status.get('text')
+    if retweeted_text:
+      retweeted_text = retweeted_text.encode('utf-8')
+  else:
+    retweeted_id = None
+    retweeted_text = None
+  retweeted_user = None
+  # Get users @mentioned by the tweet.
+  mention_entities = status.get('entities', {}).get('user_mentions')
+  if mention_entities:
+    user_mentions_list = []
+    for entity in mention_entities:
+      user_mentions_list.append(entity.get('screen_name'))
+      if retweeted_status and entity['indices'][0] == 3:
+        # This may not always be correct. It's assuming all retweets start with "RT @user:".
+        retweeted_user = entity.get('screen_name')
+    user_mentions = ','.join(user_mentions_list)
+  else:
+    user_mentions = None
   # Construct the return data structure.
   return {'id':status.get('id'),
+          'user':user.get('screen_name'),
           'truncated':status.get('truncated'),
-          'screen_name':user.get('screen_name'),
           'in_reply_to_status_id':status.get('in_reply_to_status_id'),
           'in_reply_to_screen_name':status.get('in_reply_to_screen_name'),
+          'is_retweet':bool(retweeted_status),
+          'retweeted_id':retweeted_id,
+          'retweeted_text':retweeted_text,
+          'retweeted_user':retweeted_user,
+          'user_mentions':user_mentions,
           'text':text}
 
 
-def get_status(entry):
+def get_user_and_status(entry):
   if 'user' in entry:
-    return entry
+    # It's a status type of entry.
+    return entry, entry['user']
   elif 'status' in entry:
-    return entry['status']
+    # It's a profile type of entry.
+    return entry['status'], entry
   else:
-    return None
+    return None, None
 
 
 def format_tweet_for_humans(raw_tweet, file_num, entry_num):
