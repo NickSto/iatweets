@@ -24,7 +24,7 @@ def make_argparser():
     help='Un-gzipped WARC files.')
   parser.add_argument('-c', '--columns',
     help='Output columns, comma-delimited. Names are WARC headers or fields from the tweet JSON. '
-         'Also includes special columns: id, user, text, truncated, in_reply_to_status_id, '
+         'Also includes special columns: empty, id, user, text, truncated, in_reply_to_status_id, '
          'in_reply_to_screen_name, is_retweet, retweeted_id, retweeted_text, user_mentions, '
          'filename, tweet_num. Default: %(default)s')
   parser.add_argument('-i', '--ignore-empties', action='store_true')
@@ -42,7 +42,12 @@ def main(argv):
   parser = make_argparser()
   args = parser.parse_args(argv[1:])
 
-  outfmt = '{'+'}\t{'.join(args.columns.split(','))+'}'
+  columns = args.columns.split(',')
+  outfmt = '{'+'}\t{'.join(columns)+'}'
+  warc_headers_dict = {}
+  for column in columns:
+    if column.startswith('WARC-'):
+      warc_headers_dict[column] = None
 
   logging.basicConfig(stream=args.log, level=args.volume, format='%(message)s')
   tone_down_logger()
@@ -53,10 +58,10 @@ def main(argv):
       tweet_num += 1
       if not payload and args.ignore_empties:
         continue
-      columns_dict = payload
+      columns_dict = warc_headers_dict.copy()
       columns_dict.update(headers)
       columns_dict.update(extract_tweet(payload, already_json=True, empty_empties=False))
-      if columns_dict['text']:
+      if columns_dict.get('text'):
         columns_dict['text'] = columns_dict['text'].replace('\n', '\\n')
       columns_dict['filename'] = warc_path
       columns_dict['tweet_num'] = tweet_num
@@ -76,16 +81,19 @@ def extract_tweet(entry_raw, already_json=False, empty_empties=True):
     try:
       entry = json.loads(entry_raw)
     except ValueError:
-      logging.critical('Content: {}'.format(type(entry_raw).__name__, entry_raw[:90]))
+      logging.critical('Content ({}): "{}.."'.format(type(entry_raw).__name__, entry_raw[:90]))
       raise
   # Find the user and status objects in the entry.
   status, user = get_user_and_status(entry)
   if status is None and user is None:
     # It's a profile with no attached tweet (or something else).
+    empty = True
     if empty_empties:
       return None
     status = {}
     user = {}
+  else:
+    empty = False
   # Get and utf8-encode the status text.
   if 'full_text' in status:
     text = status.get('full_text')
@@ -117,8 +125,10 @@ def extract_tweet(entry_raw, already_json=False, empty_empties=True):
   else:
     user_mentions = None
   # Construct the return data structure.
-  return {'id':status.get('id'),
+  return {'empty':empty,
+          'id':status.get('id'),
           'user':user.get('screen_name'),
+          'screen_name':user.get('screen_name'),
           'truncated':status.get('truncated'),
           'in_reply_to_status_id':status.get('in_reply_to_status_id'),
           'in_reply_to_screen_name':status.get('in_reply_to_screen_name'),
@@ -141,7 +151,7 @@ def get_user_and_status(entry):
     return None, None
 
 
-def format_tweet_for_humans(raw_tweet, file_num, entry_num):
+def format_tweet_for_humans(raw_tweet, replied_by, file_num, entry_num):
   output = ''
   if isinstance(raw_tweet, dict):
     data_type = 'json'
@@ -156,11 +166,6 @@ def format_tweet_for_humans(raw_tweet, file_num, entry_num):
     fail('{}/{}: Object of unsupported type ({}) given to format_tweet_for_humans().'
          .format(file_num, entry_num, type(raw_tweet)))
   try:
-    if data_type == 'request':
-      screen_name = tweet['user']['screen_name']
-    else:
-      screen_name = tweet['screen_name']
-    id = tweet['id']
     # Note: 'full_text' is needed instead of 'text' in order to get new-style tweets over 140
     # characters, including @mentions and links:
     # https://dev.twitter.com/overview/api/upcoming-changes-to-tweets
@@ -168,22 +173,58 @@ def format_tweet_for_humans(raw_tweet, file_num, entry_num):
       content = tweet['full_text'].encode('utf-8')
     else:
       content = tweet['text'].decode('utf-8').encode('utf-8')
-    output += '{}/{}: https://twitter.com/{}/status/{}\n'.format(file_num, entry_num, screen_name, id)
     try:
-      output += content
+      output += '{}/{}: {}\n'.format(file_num, entry_num, get_tweet_url(tweet, 'json'))
+    except ValueError:
+      logging.critical('{}/{}:'.format(file_num, entry_num))
+      raise
+    try:
+      output += content+'\n'
     except UnicodeDecodeError:
       logging.error('{}/{}: data_type: {}, content: {}'
                     .format(file_num, entry_num, data_type, content))
       raise
     if tweet['in_reply_to_status_id']:
-      output += ('\nA reply to: https//twitter.com/{in_reply_to_screen_name}/status/'
-                 '{in_reply_to_status_id}'.format(**tweet))
-    output += '\nLooks truncated: {}'.format(does_tweet_look_truncated(tweet))
+      output += 'A reply to: {}\n'.format(get_in_reply_to_url(tweet))
+    if replied_by:
+      output += 'Replied by: '+get_tweet_url(replied_by)+'\n'
+    output += 'Looks truncated: {}\n'.format(does_tweet_look_truncated(tweet))
   except KeyError as ke:
     logging.warn('{}/{}: Error in tweet data converted from {}: JSON is missing key "{}".\n '
                  'Tweet: {}..'.format(file_num, entry_num, data_type, ke[0], json.dumps(tweet))[:200])
     raise
   return output
+
+
+def get_tweet_url(raw_tweet, data_type=None):
+  if data_type is None:
+    # Detect the type of raw_tweet, if it wasn't specified.
+    if isinstance(raw_tweet, dict):
+      data_type = 'json'
+    elif isinstance(raw_tweet, requests.models.Response):
+      data_type = 'request'
+    elif isinstance(raw_tweet, basestring):
+      data_type = 'json_str'
+    else:
+      raise ValueError('Object of unsupported type ({}) given to format_tweet_for_humans().'
+                       .format(type(raw_tweet).__name__))
+  if data_type == 'json':
+    if 'screen_name' in raw_tweet:
+      return 'https://twitter.com/{screen_name}/status/{id}'.format(**raw_tweet)
+    else:
+      return 'https://twitter.com/{}/status/{}'.format(raw_tweet['user']['screen_name'], raw_tweet['id'])
+  elif data_type == 'request':
+    tweet_json = raw_tweet.json()
+  elif data_type == 'json_str':
+    tweet_json = json.loads(raw_tweet)
+  screen_name = tweet_json.get('user', {}).get('screen_name')
+  id = tweet_json.get('id')
+  return 'https://twitter.com/{}/status/{}'.format(screen_name, id)
+
+
+def get_in_reply_to_url(tweet):
+  return ('https://twitter.com/{in_reply_to_screen_name}/status/{in_reply_to_status_id}'
+          .format(**tweet))
 
 
 def does_tweet_look_truncated(tweet):
@@ -197,6 +238,10 @@ def does_tweet_look_truncated(tweet):
     return True
   else:
     return False
+
+
+def json_pretty_format(jobj):
+  return json.dumps(jobj, sort_keys=True, indent=2, separators=(',', ': ')).encode('utf-8')
 
 
 def tone_down_logger():
