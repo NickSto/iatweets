@@ -144,14 +144,12 @@ def create_return_data(content, headers, warc_type, payload_json, omit_headers, 
   if payload_json:
     if warc_type == 'request' or warc_type == 'response':
       content = strip_http_headers(content, warc_type)
-      if content:
-        try:
-          payload = json.loads(content)
-        except ValueError:
-          logging.critical('Payload: "{}"'.format(content[:130]))
-          raise
-      else:
-        payload = {}
+    if content and warc_type in ('request', 'response', 'conversion'):
+      try:
+        payload = json.loads(content)
+      except ValueError:
+        logging.critical('Payload: "{}"'.format(content[:130]))
+        raise
     else:
       payload = {}
   else:
