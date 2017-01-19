@@ -109,6 +109,9 @@ def main(argv):
           sys.stdout.write(entry+'\r\n')
       else:
         # Print this tweet and all others above it in the conversation.
+        #TODO: Skip entries that are just profiles, since I think the point of those isn't to
+        #      actually contain tweets. And the tweets they do contain may be duplicates of others
+        #      in the archive.
         # Use the Twitter API to re-retrieve this tweet if it's truncated, and the rest of the
         # conversation chain.
         tweet_looks_truncated = tweet_tools.does_tweet_look_truncated(tweet)
