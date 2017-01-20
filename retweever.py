@@ -81,9 +81,7 @@ class Api(object):
         discreet structure, including: user_mentions, urls, and
         hashtags. [Optional]
     Returns:
-      data:
-        The raw content of the response (decoded as UTF-8), or None on failure.
-      resp:
+      response:
         The requests.models.Response object.
     """
     url = '%s/statuses/show.json' % (self.base_url)
@@ -96,14 +94,12 @@ class Api(object):
       'include_ext_alt_text': enf_type('include_ext_alt_text', bool, include_ext_alt_text)
     }
 
-    resp = self._RequestUrl(url, data=parameters)
-    if resp:
-      data = resp.content.decode('utf-8')
+    response = self._RequestUrl(url, data=parameters)
+    if response:
+      data = response.content.decode('utf-8')
       self._ParseAndCheckTwitter(data)
-    else:
-      data = None
 
-    return data, resp
+    return response
 
 
   def _RequestUrl(self, url, data=None, json=None):
