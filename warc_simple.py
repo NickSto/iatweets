@@ -1,4 +1,10 @@
 #!/usr/bin/env python
+"""
+This module is a simplified parser for WARC-like files.
+Any file should work, if it consists of one or more WARC records, each beginning with a version
+number line like "WARC/1.0". The headers must end with one blank line.
+The version number (any number will work) is the only required header (for parsing).
+"""
 from __future__ import division
 from __future__ import print_function
 from __future__ import absolute_import
@@ -8,12 +14,6 @@ import errno
 import logging
 import argparse
 import collections
-"""
-This module is a simplified parser for WARC-like files.
-Any file should work, if it consists of one or more WARC records, each beginning with a version
-number line like "WARC/1.0". The headers must end with one blank line.
-The version number (any number will work) is the only required header (for parsing).
-"""
 
 HTTP_METHODS = ('get', 'post', 'head', 'put', 'delete', 'trace', 'options', 'connect', 'patch')
 ARG_DEFAULTS = {'log':sys.stderr, 'volume':logging.ERROR}
